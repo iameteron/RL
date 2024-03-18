@@ -7,50 +7,12 @@ import matplotlib.pyplot as plt
 from matplotlib import animation
 
 
-def hjb_loss(agent, states, next_states, rewards):
-
-    states.requires_grad = True
-    next_states.requires_grad = True
-
-    values_grad = agent.v_model(states)
-    value_derivative = torch.autograd.grad(
-        values_grad,
-        states,
-        grad_outputs=torch.ones_like(values_grad),
-        create_graph=True,
-        retain_graph=True,
-    )[0]
-
-    states.requires_grad = False
-
-    dynamics = (next_states - states) / agent.dt
-
-    value_derivative_dot_f = torch.bmm(
-        value_derivative.view(value_derivative.shape[0], 1, value_derivative.shape[1]), 
-        dynamics.view(value_derivative.shape[0], value_derivative.shape[1], 1)
-        ).flatten()
-    
-    hjb_loss = torch.nn.functional.mse_loss(values_grad * np.log(agent.gamma), value_derivative_dot_f[:, None] + rewards)
-    return hjb_loss
-
-def get_hjb_loss(agent, trajectory):
-    states, actions, rewards = map(np.array, [trajectory['states'][:-1], trajectory['actions'], trajectory['rewards']])
-    rewards = rewards.reshape(-1, 1)
-
-    next_states = np.zeros_like(states)
-    next_states[:-1] = states[1:]
-
-    states, next_states, actions, rewards = map(torch.FloatTensor, [states, next_states, actions, rewards])
-    states = states[:, agent.observable_states]
-
-    return hjb_loss(agent, states, next_states, rewards).detach().numpy()
-
-
 class PPO(nn.Module):
     def __init__(
             self, 
             state_dim: int, 
             action_dim: int, 
+            state_n: int,
             max_action: float, 
             observable_states: list,
             gamma: float = 0.999, 
@@ -61,28 +23,44 @@ class PPO(nn.Module):
             v_lr: float = 3e-4,
             hjb_lambda: float = 0,
             v_lambda: float = 1,
-            dt: float = 0.1
+            dt: float = 0.1,
+            discrete_action_space: bool = False
         ):
 
         super().__init__()
         
-        self.state_dim = state_dim
+        self.discrete_action_space = discrete_action_space
+        if discrete_action_space:
+            self.action_n = state_n
+        else:
+            self.state_dim = state_dim
+
         self.action_dim = action_dim
         
         self.observable_states = observable_states
 
-        self.pi_model = nn.Sequential(
-            nn.Linear(len(self.observable_states), 16), 
-            nn.ReLU(),
-            nn.Linear(16, 2 * self.action_dim), 
-            nn.Tanh()
-        )
+        if discrete_action_space:
+            self.pi_model = nn.Sequential(
+                nn.Linear(len(self.observable_states), 16), 
+                nn.ReLU(),
+                nn.Linear(16, self.action_dim * self.action_n), 
+            )
+
+        else:
+            self.pi_model = nn.Sequential(
+                nn.Linear(len(self.observable_states), 16), 
+                nn.ReLU(),
+                nn.Linear(16, 2 * self.action_dim), 
+                nn.Tanh()
+            )
         
         self.v_model = nn.Sequential(
             nn.Linear(len(self.observable_states), 16), 
             nn.ReLU(),
             nn.Linear(16, 1)
         )
+
+        self.softmax = nn.Softmax()
 
         self.gamma = gamma
         self.batch_size = batch_size
@@ -97,20 +75,36 @@ class PPO(nn.Module):
         self.hjb_lambda = hjb_lambda
         self.v_lambda = v_lambda
 
+        self.history = []
+        self.hjb_history = []
+
     def get_action(
             self, 
             state, 
             prediction=False
-        ):
+    ):
 
         logits = self.pi_model(torch.FloatTensor(state)[self.observable_states])
-        mean, log_std = logits[:self.action_dim], logits[self.action_dim:]
-        if prediction:
-            action = mean.detach()
+
+        if self.discrete_action_space:
+            action_prob = self.softmax(logits)
+            action_prob = action_prob.detach().numpy()
+            if prediction:
+                action = np.argmax(action_prob)
+            else:
+                action = np.random.choice(self.action_n, p=action_prob)
+
+            return action
+
         else:
-            dist = Normal(mean, torch.exp(log_std))
-            action = dist.sample()
-        return action.numpy().reshape(self.action_dim)
+            mean, log_std = logits[:self.action_dim], logits[self.action_dim:]
+            if prediction:
+                action = mean.detach()
+            else:
+                dist = Normal(mean, torch.exp(log_std))
+                action = dist.sample()
+
+            return action.numpy().reshape(self.action_dim)
 
     def fit(
             self, 
@@ -177,7 +171,6 @@ class PPO(nn.Module):
                 
                 v_loss = self.v_lambda * torch.mean(b_advantage ** 2)
 
-                # HJB loss
                 b_hjb_loss = hjb_loss(self, b_states, b_next_states, b_rewards)
                 v_loss += self.hjb_lambda * b_hjb_loss
     
@@ -207,20 +200,13 @@ class PPO(nn.Module):
         frames = []
         while True:
 
+            action = self.get_action(state, prediction=prediction)
+            action = self.to_action(action)
+
+            next_state, reward, _, done, _ = env.step(action)
+
             trajectory['states'].append(state)
-
-            if sb3 == True:
-                action, _ = self.predict(state, deterministic=True)
-            else:
-                action = self.get_action(state, prediction=prediction)
-            
             trajectory['actions'].append(action)
-
-            if sb3 == True:
-                next_state, reward, _, done, _ = env.step(action)
-            else:
-                next_state, reward, _, done, _ = env.step(self.max_action * action)
-
             trajectory['rewards'].append(reward)
             trajectory['dones'].append(done)
 
@@ -238,6 +224,15 @@ class PPO(nn.Module):
         trajectory['states'].append(state)
 
         return trajectory
+    
+    def to_action(
+        self,
+        action
+    ):
+        if self.discrete_action_space:
+            return self.max_action * action / self.action_n
+        else:
+            return self.max_action * action
 
 
 def save_frames_as_gif(frames, path='./', filename='gym_animation.gif', fps=60):
@@ -263,10 +258,13 @@ def validation(env, agent, validation_n, prediction=False, sb3=False):
     return np.mean(total_rewards)
 
 
-def train_ppo(env, agent, episode_n=50, trajectory_n=20, advantage='default', hjb=False):
-    total_rewards = []
-    if hjb == True:
-        hjb_history = []
+def train_ppo(
+    env, 
+    agent: PPO, 
+    episode_n: int = 50, 
+    trajectory_n: int = 20, 
+    advantage: str ='default', 
+):
 
     for episode in range(episode_n):
 
@@ -275,24 +273,19 @@ def train_ppo(env, agent, episode_n=50, trajectory_n=20, advantage='default', hj
         for i in range(trajectory_n):
 
             trajectory = agent.get_trajectory(env)
-            if hjb == True:
-                hjb_history.append(get_hjb_loss(agent, trajectory))
+            if agent.hjb_lambda != 0:
+                agent.hjb_history.append(get_hjb_loss(agent, trajectory))
 
             states.extend(trajectory['states'][:-1])
             actions.extend(trajectory['actions'])
             rewards.extend(trajectory['rewards'])
             dones.extend(trajectory['dones'])
 
-            total_rewards.append(np.sum(trajectory['rewards']))
+            agent.history.append(np.sum(trajectory['rewards']))
 
-        print(f"{episode}: mean reward = {np.mean(total_rewards[-trajectory_n:])}")
+        print(f"{episode}: mean reward = {np.mean(agent.history[-trajectory_n:])}")
 
         agent.fit(states, actions, rewards, dones, advantage)
-
-    if hjb == True:
-        return total_rewards, hjb_history
-    else:
-        return total_rewards
 
 
 def plot_history(history, alpha=0.1, ylim=[-10**3, 0]):
@@ -308,3 +301,42 @@ def plot_history(history, alpha=0.1, ylim=[-10**3, 0]):
     plt.ylabel('Smoothed trajectory reward')
     plt.legend()
     plt.plot(smoothed_history)
+
+
+def hjb_loss(agent, states, next_states, rewards):
+
+    states.requires_grad = True
+    next_states.requires_grad = True
+
+    values_grad = agent.v_model(states)
+    value_derivative = torch.autograd.grad(
+        values_grad,
+        states,
+        grad_outputs=torch.ones_like(values_grad),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+
+    states.requires_grad = False
+
+    dynamics = (next_states - states) / agent.dt
+
+    value_derivative_dot_f = torch.bmm(
+        value_derivative.view(value_derivative.shape[0], 1, value_derivative.shape[1]), 
+        dynamics.view(value_derivative.shape[0], value_derivative.shape[1], 1)
+        ).flatten()
+    
+    hjb_loss = torch.nn.functional.mse_loss(values_grad * np.log(agent.gamma), value_derivative_dot_f[:, None] + rewards)
+    return hjb_loss
+
+def get_hjb_loss(agent, trajectory):
+    states, actions, rewards = map(np.array, [trajectory['states'][:-1], trajectory['actions'], trajectory['rewards']])
+    rewards = rewards.reshape(-1, 1)
+
+    next_states = np.zeros_like(states)
+    next_states[:-1] = states[1:]
+
+    states, next_states, actions, rewards = map(torch.FloatTensor, [states, next_states, actions, rewards])
+    states = states[:, agent.observable_states]
+
+    return hjb_loss(agent, states, next_states, rewards).detach().numpy()
