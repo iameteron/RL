@@ -5,18 +5,35 @@ from scipy.integrate import solve_ivp
 
 import matplotlib.pyplot as plt
 
+
+def default_reward(env, u):
+    # индуцируется классической постановкой
+    reward = - env.R3 * env.dt * u[0]**2
+    if np.isclose(env.state[0] + env.dt, env.t_end):
+        reward += - env.R1 * (env.state[1] - np.pi)**2 - env.R2 * env.state[2]**2
+    return reward
+
+
+def stability_reward(env, u, t_next):
+    # gym-подобная функция наград
+    reward = - env.R1 * (env.state[1] - np.pi)**2 - env.R2 * env.state[2]**2 - env.R3 * env.dt * u[0]**2
+    return reward
+
+
 class FlatOrientation(gym.Env):
     def __init__(
             self, 
             t_start: int = 0, 
             t_end: int = 1,
             dt: float = 0.1, 
-            R1: int = 1000,
-            R2: int = 1000,
+            R1: float = 1000,
+            R2: float = 1000,
+            R3: float = 1,
             max_action: int = 25,
+            reward_function = default_reward,
             observable_states: list = [0, 1, 2],
             ic_boundaries: list = [[-0.5, 0.5], [-0.5, 0.5]],
-            integration: str = 'RK45'
+            integration: str = 'RK45',
     ):
 
         self.t_start = t_start
@@ -24,6 +41,7 @@ class FlatOrientation(gym.Env):
         self.dt = dt
         self.R1 = R1
         self.R2 = R2
+        self.R3 = R3
         self.max_action = max_action
         self.ic_boundaries = np.array(ic_boundaries)
         self.observable_states = observable_states
@@ -38,6 +56,7 @@ class FlatOrientation(gym.Env):
             low=-self.max_action, high=self.max_action, shape=(1,), dtype=np.float32
         )
         self.integration = integration
+        self.reward_function = default_reward
 
     def reset(self, seed=None, options=None):
         self.state = np.array(
@@ -50,21 +69,11 @@ class FlatOrientation(gym.Env):
         t_next = self.state[0] + self.dt
         x_curr = self.state[1:]
         df_dt = lambda t, x: rhs(t, x, u)
-
         x_next = self.integrate(df_dt, t_curr, t_next, x_curr, u)
-        
         self.state = np.hstack((t_next, x_next)) 
 
-        if np.isclose(t_next, self.t_end):
-            reward = - self.R1 * (self.state[1] - np.pi)**2 - self.R2 * self.state[2]**2
-            reward -= self.dt * u[0]**2
-            done = True
-
-        else:
-            # reward = - self.R1 * (self.state[1] - np.pi)**2 - self.R2 * self.state[2]**2
-            # reward -= self.dt * u[0]**2
-            reward = - self.dt * u[0]**2
-            done = False
+        reward = self.reward_function(self, u)
+        done = np.isclose(t_next, self.t_end)
 
         return self.state, reward, False, done, {}
 
@@ -73,11 +82,11 @@ class FlatOrientation(gym.Env):
             x_next = rhs(t_curr, x_curr, u) * self.dt + x_curr
 
         else:
-            sol = solve_ivp(df_dt, (t_curr, t_next), x_curr, method=self.integration) #, t_eval=t_eval)
+            sol = solve_ivp(df_dt, (t_curr, t_next), x_curr, method=self.integration)
             x_next = sol.y.T[-1]
 
         return x_next
-            
+
     
 def rhs(t, x, u):
     return np.array([x[1], u[0]])
