@@ -12,6 +12,7 @@ class PPO(nn.Module):
             self, 
             state_dim: int, 
             action_dim: int, 
+            state_n: int,
             max_action: float, 
             observable_states: list,
             gamma: float = 0.999, 
@@ -22,19 +23,29 @@ class PPO(nn.Module):
             v_lr: float = 3e-4,
             hjb_lambda: float = 0,
             v_lambda: float = 1,
-            dt: float = 0.1,
+            dt: float = 0.1
         ):
 
         super().__init__()
+        
+        self.state_dim = state_dim
         self.action_dim = action_dim
         self.observable_states = observable_states
 
-        self.pi_model = nn.Sequential(
-            nn.Linear(len(self.observable_states), 16), 
-            nn.ReLU(),
-            nn.Linear(16, 2 * self.action_dim), 
-            nn.Tanh()
-        )
+        if discrete_action_space:
+            self.pi_model = nn.Sequential(
+                nn.Linear(len(self.observable_states), 16), 
+                nn.ReLU(),
+                nn.Linear(16, self.action_dim * self.action_n), 
+            )
+
+        else:
+            self.pi_model = nn.Sequential(
+                nn.Linear(len(self.observable_states), 16), 
+                nn.ReLU(),
+                nn.Linear(16, 2 * self.action_dim), 
+                nn.Tanh()
+            )
         
         self.v_model = nn.Sequential(
             nn.Linear(len(self.observable_states), 16), 
@@ -73,10 +84,6 @@ class PPO(nn.Module):
         else:
             dist = Normal(mean, torch.exp(log_std))
             action = dist.sample()
-            # dist = Normal(0, torch.exp(log_std))
-            # std = dist.sample()
-            # action = mean + std
-
         return action.numpy().reshape(self.action_dim)
 
     def fit(
@@ -173,9 +180,6 @@ class PPO(nn.Module):
         frames = []
         while True:
 
-            action = self.get_action(state, prediction=prediction)
-            next_state, reward, _, done, _ = env.step(self.to_action(action))
-
             trajectory['states'].append(state)
             trajectory['actions'].append(action)
             trajectory['rewards'].append(reward)
@@ -195,12 +199,6 @@ class PPO(nn.Module):
         trajectory['states'].append(state)
 
         return trajectory
-    
-    def to_action(
-        self,
-        action
-    ):
-        return self.max_action * action
 
 
 def save_frames_as_gif(frames, path='./', filename='gym_animation.gif', fps=60):
