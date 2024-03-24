@@ -14,7 +14,7 @@ def default_reward(env, u):
     return reward
 
 
-def stability_reward(env, u, t_next):
+def stability_reward(env, u):
     # gym-подобная функция наград
     reward = - env.R1 * (env.state[1] - np.pi)**2 - env.R2 * env.state[2]**2 - env.R3 * env.dt * u[0]**2
     return reward
@@ -56,7 +56,7 @@ class FlatOrientation(gym.Env):
             low=-self.max_action, high=self.max_action, shape=(1,), dtype=np.float32
         )
         self.integration = integration
-        self.reward_function = default_reward
+        self.reward_function = reward_function
 
     def reset(self, seed=None, options=None):
         self.state = np.array(

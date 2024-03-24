@@ -14,7 +14,6 @@ class PPO(nn.Module):
             action_dim: int, 
             max_action: float, 
             observable_states: list,
-            state_n: int = 0,
             gamma: float = 0.999, 
             batch_size: int = 128, 
             epsilon: float = 0.2, 
@@ -24,35 +23,18 @@ class PPO(nn.Module):
             hjb_lambda: float = 0,
             v_lambda: float = 1,
             dt: float = 0.1,
-            discrete_action_space: bool = False
         ):
 
         super().__init__()
-        
-        self.discrete_action_space = discrete_action_space
-        if discrete_action_space:
-            self.action_n = state_n
-        else:
-            self.state_dim = state_dim
-
         self.action_dim = action_dim
-        
         self.observable_states = observable_states
 
-        if discrete_action_space:
-            self.pi_model = nn.Sequential(
-                nn.Linear(len(self.observable_states), 16), 
-                nn.ReLU(),
-                nn.Linear(16, self.action_dim * self.action_n), 
-            )
-
-        else:
-            self.pi_model = nn.Sequential(
-                nn.Linear(len(self.observable_states), 16), 
-                nn.ReLU(),
-                nn.Linear(16, 2 * self.action_dim), 
-                nn.Tanh()
-            )
+        self.pi_model = nn.Sequential(
+            nn.Linear(len(self.observable_states), 16), 
+            nn.ReLU(),
+            nn.Linear(16, 2 * self.action_dim), 
+            nn.Tanh()
+        )
         
         self.v_model = nn.Sequential(
             nn.Linear(len(self.observable_states), 16), 
@@ -70,7 +52,6 @@ class PPO(nn.Module):
         self.v_optimizer = torch.optim.Adam(self.v_model.parameters(), lr=v_lr)
 
         self.max_action = max_action
-        self.discrete_action_space = discrete_action_space
 
         self.dt = dt
         self.hjb_lambda = hjb_lambda
@@ -86,26 +67,17 @@ class PPO(nn.Module):
     ):
 
         logits = self.pi_model(torch.FloatTensor(state)[self.observable_states])
-
-        if self.discrete_action_space:
-            action_prob = self.softmax(logits)
-            action_prob = action_prob.detach().numpy()
-            if prediction:
-                action = np.argmax(action_prob)
-            else:
-                action = np.random.choice(self.action_n, p=action_prob)
-
-            return action
-
+        mean, log_std = logits[:self.action_dim], logits[self.action_dim:]
+        if prediction:
+            action = mean.detach()
         else:
-            mean, log_std = logits[:self.action_dim], logits[self.action_dim:]
-            if prediction:
-                action = mean.detach()
-            else:
-                dist = Normal(mean, torch.exp(log_std))
-                action = dist.sample()
+            dist = Normal(mean, torch.exp(log_std))
+            action = dist.sample()
+            # dist = Normal(0, torch.exp(log_std))
+            # std = dist.sample()
+            # action = mean + std
 
-            return action.numpy().reshape(self.action_dim)
+        return action.numpy().reshape(self.action_dim)
 
     def fit(
             self, 
@@ -136,7 +108,7 @@ class PPO(nn.Module):
         dist = Normal(mean, torch.exp(log_std))
         old_log_probs = dist.log_prob(actions).detach()
 
-        for epoch in range(self.epoch_n):
+        for _ in range(self.epoch_n):
             
             idxs = np.random.permutation(returns.shape[0])
             for i in range(0, returns.shape[0], self.batch_size):
@@ -202,9 +174,7 @@ class PPO(nn.Module):
         while True:
 
             action = self.get_action(state, prediction=prediction)
-            action = self.to_action(action)
-
-            next_state, reward, _, done, _ = env.step(action)
+            next_state, reward, _, done, _ = env.step(self.to_action(action))
 
             trajectory['states'].append(state)
             trajectory['actions'].append(action)
@@ -230,10 +200,7 @@ class PPO(nn.Module):
         self,
         action
     ):
-        if self.discrete_action_space:
-            return self.max_action * action / self.action_n
-        else:
-            return self.max_action * action
+        return self.max_action * action
 
 
 def save_frames_as_gif(frames, path='./', filename='gym_animation.gif', fps=60):
