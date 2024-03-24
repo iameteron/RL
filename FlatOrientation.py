@@ -94,8 +94,7 @@ def rhs(t, x, u):
 
 def plot_u(env, agent):
     traj = agent.get_trajectory(env, prediction=True, initial_state=np.array([0, 0, 0]))
-    actions = np.array(traj['actions'])
-    u = agent.max_action * actions
+    u = np.array(traj['actions'])
     t = np.arange(env.t_start, env.t_end + env.dt, env.dt)
 
     new_u = np.repeat(u, 2)
